@@ -1,158 +1,97 @@
-# Install required libraries
-!pip install requests transformers datasets scikit-learn pandas textblob
-
-# Import libraries
 import requests
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score
-from transformers import RobertaTokenizer, RobertaForSequenceClassification, Trainer, TrainingArguments
+import torch
+import easyocr
+import os
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification, Trainer, TrainingArguments
 from datasets import Dataset
-from textblob import TextBlob
+from PIL import Image
+from sklearn.model_selection import train_test_split
+from torch.nn.functional import softmax
 
-# Step 1: Fetch news data from NewsAPI
+# Load tokenizer and model
+tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+model = DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased', num_labels=2)
+
+# OCR Model
+reader = easyocr.Reader(['en'])
+
+# Step 1: Fetch real-time news data from NewsAPI
 def fetch_news(api_key, query="technology", language="en", page_size=50):
-    """
-    Fetch news articles from NewsAPI.
-    """
     url = f"https://newsapi.org/v2/everything?q={query}&language={language}&pageSize={page_size}&apiKey={api_key}"
-    print(f"Fetching data from: {url}")  # Debug statement
     response = requests.get(url)
-
     if response.status_code == 200:
         data = response.json()
-        articles = data.get("articles", [])
-        print(f"Fetched {len(articles)} articles.")  # Debug statement
-        return articles
-    else:
-        print(f"Failed to fetch news. Status code: {response.status_code}")
-        print(f"Response: {response.text}")  # Debug statement
-        # Fallback: Use a small sample dataset
-        print("Using fallback data...")
-        return [
-            {"title": "Real News Example", "content": "This is an example of real news.", "source": {"name": "Example Source"}},
-            {"title": "Fake News Example", "content": "This is an example of fake news.", "source": {"name": "Example Source"}}
-        ]
+        return data.get("articles", [])
+    return []
 
-# Step 2: Preprocess the news data
+# Step 2: Preprocess news data
 def preprocess_news(articles):
-    """
-    Convert the fetched news articles into a DataFrame.
-    """
     news_data = []
     for article in articles:
         title = article.get("title", "")
         content = article.get("content", "")
-        source = article.get("source", {}).get("name", "")
-        if title and content:  # Ensure both title and content are present
-            news_data.append({"text": title + " " + content, "source": source})
-
-    print(f"Processed {len(news_data)} articles.")  # Debug statement
+        if title and content:
+            news_data.append({"text": title + " " + content, "label": 0})  # Assume real
     return pd.DataFrame(news_data)
 
-# Step 3: Add labels to the data (dummy labels for now)
-def add_labels(news_data):
-    """
-    Add dummy labels to the news data.
-    In a real-world scenario, you would need labeled data (e.g., from fact-checking organizations).
-    """
-    news_data['label'] = 0  # Assume all fetched news is real for now
-    return news_data
-
-# Step 4: Load RoBERTa tokenizer and model
-tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
-model = RobertaForSequenceClassification.from_pretrained('roberta-base', num_labels=2)
-
-# Step 5: Tokenize the data
+# Step 3: Tokenization
 def tokenize_function(examples):
     return tokenizer(examples['text'], padding="max_length", truncation=True)
 
-# Step 6: Train the model
+# Step 4: Train model
 def train_model(news_data):
-    """
-    Train a RoBERTa model on the news data.
-    """
-    # Split the data into training and testing sets
     train_data, test_data = train_test_split(news_data, test_size=0.2, random_state=42)
-
-    # Convert to Hugging Face Dataset format
     train_dataset = Dataset.from_pandas(train_data)
     test_dataset = Dataset.from_pandas(test_data)
-
-    # Tokenize the datasets
     train_dataset = train_dataset.map(tokenize_function, batched=True)
     test_dataset = test_dataset.map(tokenize_function, batched=True)
 
-    # Set up training arguments
     training_args = TrainingArguments(
-        output_dir='./results',
-        evaluation_strategy="epoch",
-        learning_rate=1e-5,  # Adjust learning rate
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=16,
-        num_train_epochs=5,  # Increase epochs
+        output_dir='./results', evaluation_strategy="epoch", learning_rate=2e-5, 
+        per_device_train_batch_size=16, per_device_eval_batch_size=16, num_train_epochs=3,
         weight_decay=0.01,
-        save_steps=10_000,
-        save_total_limit=2,
     )
-
-    # Initialize the Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=test_dataset,
-    )
-
-    # Train the model
-    print("Training the model...")
+    trainer = Trainer(model=model, args=training_args, train_dataset=train_dataset, eval_dataset=test_dataset)
     trainer.train()
-
-    # Evaluate the model
-    print("Evaluating the model...")
-    results = trainer.evaluate()
-    print("Evaluation Results:", results)
-
     return trainer
 
-# Step 7: Detect fake news on new input
+# Step 5: Extract text from images using OCR
+def extract_text_from_image(image_path):
+    result = reader.readtext(image_path, detail=0)
+    return " ".join(result) if result else None
+
+# Step 6: Fake news detection
 def detect_fake_news(trainer, text):
-    """
-    Predict whether the input text is real or fake.
-    """
     inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
     outputs = trainer.model(**inputs)
-    probabilities = outputs.logits.softmax(dim=1)
-    prediction = probabilities.argmax(dim=1).item()
+    probabilities = softmax(outputs.logits, dim=1)
+    prediction = torch.argmax(probabilities, dim=1).item()
+    return "REAL" if prediction == 0 else "FAKE", float(probabilities[0][prediction])
 
-    if prediction == 0:
-        return f"The news is REAL with a probability of {probabilities[0][0]:.2f}"
-    else:
-        return f"The news is FAKE with a probability of {probabilities[0][1]:.2f}"
-
-# Step 8: Main function
+# Step 7: Main function
 def main():
-    # Replace 'your_api_key' with your NewsAPI key
-    api_key = "be915b13ac013b27178b9897884868a1384ef044"
-
-    # Fetch news data
-    print("Fetching news data...")
-    articles = fetch_news(api_key, query="technology", page_size=50)  # Fetch 50 tech news articles
+    api_key = "cf3522f249a947cd8e447587c955c431"
+    articles = fetch_news(api_key)
     news_data = preprocess_news(articles)
-
-    # Add dummy labels (assume all news is real for now)
-    news_data = add_labels(news_data)
-
-    # Train the model
-    print("Training the model...")
     trainer = train_model(news_data)
+    
+    print("Choose an option: \n1. Upload an image\n2. Enter text manually")
+    choice = input("Enter 1 or 2: ")
+    
+    if choice == '1':
+        image_path = input("Enter image path: ")
+        if os.path.exists(image_path):
+            text = extract_text_from_image(image_path)
+            if text:
+                result, prob = detect_fake_news(trainer, text)
+                print(f"The news is {result} with {prob:.2f} probability.")
+            else:
+                print("No text detected.")
+    elif choice == '2':
+        text = input("Enter news text: ")
+        result, prob = detect_fake_news(trainer, text)
+        print(f"The news is {result} with {prob:.2f} probability.")
 
-    # Test the model with user input
-    print("\nEnter a news article to check if it's real or fake:")
-    user_input = input("Paste or type the news text here: ")
-    print(detect_fake_news(trainer, user_input))
-
-# Run the program
 if __name__ == "__main__":
     main()
-    
