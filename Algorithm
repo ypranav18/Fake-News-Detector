@@ -1,3 +1,5 @@
+#install datasets module pip install datasets
+#install module easyocr pip install easyocr
 import requests
 import pandas as pd
 import torch
