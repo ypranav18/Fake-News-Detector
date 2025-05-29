@@ -1,0 +1,77 @@
+#Testing Module with web UI
+
+import os
+import requests
+import torch
+import easyocr
+import gradio as gr
+from transformers import DistilBertTokenizer, DistilBertForSequenceClassification
+from torch.nn.functional import softmax
+from bs4 import BeautifulSoup
+from PIL import Image
+
+# Load model and tokenizer
+model_path = "news_classifier_model"  # Make sure to point to your trained model folder
+tokenizer = DistilBertTokenizer.from_pretrained(model_path)
+model = DistilBertForSequenceClassification.from_pretrained(model_path)
+model.eval()
+
+# OCR reader
+reader = easyocr.Reader(['en'], gpu=False)
+
+# Function to extract text from URL
+def extract_text_from_url(url):
+    try:
+        response = requests.get(url)
+        soup = BeautifulSoup(response.content, 'html.parser')
+        return " ".join([p.get_text() for p in soup.find_all("p")])
+    except Exception as e:
+        return f"Error extracting from URL: {str(e)}"
+
+# Function to extract text from image
+def extract_text_from_image(image_path):
+    result = reader.readtext(image_path, detail=0)
+    return " ".join(result) if result else "No text found in image."
+
+# Classification function
+def classify_news(text):
+    inputs = tokenizer(text, return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs = softmax(outputs.logits, dim=1)
+        pred = torch.argmax(probs).item()
+    label = "REAL" if pred == 1 else "FAKE"
+    confidence = probs[0][pred].item()
+    return f"The news is {label} with {confidence:.2f} confidence."
+
+# Main function for Gradio
+def detect_news(text_input, url_input, image_input):
+    if image_input is not None:
+        text = extract_text_from_image(image_input)
+    elif url_input:
+        text = extract_text_from_url(url_input)
+    elif text_input:
+        text = text_input
+    else:
+        return "Please provide text, URL, or image."
+
+    if not text.strip():
+        return "No readable text found."
+
+    return classify_news(text)
+
+# Gradio interface
+iface = gr.Interface(
+    fn=detect_news,
+    inputs=[
+        gr.Textbox(label="News Text", placeholder="Enter news article text..."),
+        gr.Textbox(label="News URL", placeholder="Enter URL to extract article content..."),
+        gr.Image(type="filepath", label="Upload an Image of News Article")
+    ],
+    outputs="text",
+    title="📰 Fake News Detector",
+    description="Enter text, a URL, or upload an image to check if the news is REAL or FAKE."
+)
+
+iface.launch()
+
