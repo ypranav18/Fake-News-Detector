@@ -1,0 +1,106 @@
+#Libraries
+
+!pip install transformers datasets gradio easyocr scikit-learn torch
+!pip install --upgrade transformers
+!pip install easyocr gradio
+!pip install datasets
+!pip install flask_ngrok
+!pip install pytesseract
+!pip install gradio deploy
+
+#Training the dataset(API system)
+
+import requests
+import pandas as pd
+from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments
+from sklearn.model_selection import train_test_split
+import torch
+import os
+
+# Step 1: Fetch news articles from World News API
+def fetch_news(api_key, topic="technology", language="en", page_size=50):
+    url = "https://api.worldnewsapi.com/search-news"
+    params = {
+        "api-key": api_key,
+        "text": topic,
+        "language": language,
+        "number": page_size
+    }
+
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        articles = response.json().get("news", [])
+        return articles
+    else:
+        raise Exception(f"Error fetching news: {response.status_code} - {response.text}")
+
+# Step 2: Preprocess the news articles
+def preprocess_news(articles):
+    data = []
+    for article in articles:
+        title = article.get("title", "")
+        body = article.get("text", "")
+        # Assume all fetched articles are real (label=1), for training purpose mix with fake data later
+        data.append({"text": f"{title} {body}", "label": 1})
+    return pd.DataFrame(data)
+
+# Step 3: Tokenize and encode the dataset
+tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
+
+def tokenize_function(example):
+    return tokenizer(example["text"], truncation=True, padding="max_length", max_length=512)
+
+# Step 4: Train the model
+def train_model(news_df):
+    from datasets import Dataset
+
+    dataset = Dataset.from_pandas(news_df)
+    dataset = dataset.map(tokenize_function, batched=True)
+
+    dataset = dataset.train_test_split(test_size=0.2)
+    train_dataset = dataset['train']
+    eval_dataset = dataset['test']
+
+    model = DistilBertForSequenceClassification.from_pretrained("distilbert-base-uncased", num_labels=2)
+
+    training_args = TrainingArguments(
+        output_dir='./results',
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        num_train_epochs=3,
+        logging_dir='./logs',
+        logging_steps=10,
+        save_strategy="epoch"
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        tokenizer=tokenizer
+    )
+
+    trainer.train()
+    return trainer
+
+# Step 5: Run everything
+def main():
+    api_key ="be915b13ac013b27178b9897884868a1384ef044"  # Replace this with your actual World News API key
+    topic = "technology"
+    print("Fetching news...")
+    articles = fetch_news(api_key, topic=topic, page_size=50)
+
+    print(f"Fetched {len(articles)} articles. Preprocessing...")
+    news_df = preprocess_news(articles)
+
+    print("Training model...")
+    trainer = train_model(news_df)
+    print("Training complete.")
+
+    # Optional: Save model
+    trainer.save_model("./news_classifier_model")
+    print("Model saved to ./news_classifier_model")
+
+if __name__ == "__main__":
+    main()
